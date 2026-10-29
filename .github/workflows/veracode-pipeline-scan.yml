@@ -31,20 +31,20 @@ on:
         required: true
         type: string
       source_repository:
-        required: true
-        type: string
+          required: true
+          type: string
       profile_name:
-        required: true
-        type: string
-      break_build_policy_findings:
-        required: true
-        type: string
-      break_build_on_error:
-        required: true
-        type: string
-      filter_mitigated_flaws:
-        required: true
-        type: string
+          required: true
+          type: string
+      break_build_policy_findings: 
+          required: true
+          type: string
+      break_build_on_error: 
+          required: true
+          type: string
+      filter_mitigated_flaws: 
+          required: true
+          type: string
       language:
         required: true
         type: string
@@ -54,19 +54,20 @@ on:
       debug:
         required: false
         type: string
-        default: 'false'
 
 jobs:
   prepare_pipeline_scan:
-    runs-on: ${{ fromJSON(inputs.default_runs_on) }}
-    name: Prepare pipeline scan
+    runs-on: ${{ fromJson(inputs.default_runs_on) }}
+    name: prepare pipeline scan
     outputs:
-      matrix_files: ${{ steps.get-files.outputs.matrix_files }}
-    steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v6
+      matrix_files: ${{ steps.get-files.outputs.matrix_files }} 
 
-      - name: Download compiled artifact
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+      
+      # get the compiled binary from a previous job
+      - name: get archive
         uses: actions/download-artifact@v7
         with:
           name: veracode-artifact
@@ -74,54 +75,41 @@ jobs:
 
       - name: Get list of files for matrix
         id: get-files
-        shell: bash
         run: |
-          set -euo pipefail
-          if [[ ! -d "veracode_artifact_directory" ]]; then
-            echo "::error::Artifact directory was not created."
-            exit 1
-          fi
-
-          files="$(find veracode_artifact_directory -maxdepth 1 -type f -printf '%f\\n' | jq -R -s -c 'split("\\n") | map(select(length > 0))')"
-          if [[ "$files" == "[]" ]]; then
-            echo "::error::No files were found in veracode_artifact_directory."
-            exit 1
-          fi
-
+          files=$(ls -1 veracode_artifact_directory | jq -R . | jq -s .)
           echo "Files for matrix: $files"
-          echo "matrix_files=$files" >> "$GITHUB_OUTPUT"
+          files=$(echo $files | jq -c .)  # Compact the JSON array to a single line
+          echo "matrix_files=$files" >> $GITHUB_OUTPUT
+        shell: bash
 
   pipeline_scan:
-    runs-on: ${{ fromJSON(inputs.default_runs_on) }}
+    runs-on: ${{ fromJson(inputs.default_runs_on) }}
     needs: prepare_pipeline_scan
-    name: Veracode pipeline scan
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        file: ${{ fromJSON(needs.prepare_pipeline_scan.outputs.matrix_files) }}
+        file: ${{fromJson(needs.prepare_pipeline_scan.outputs.matrix_files)}}
+
     steps:
-      - name: Checkout source repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           repository: ${{ inputs.owner }}/${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           token: ${{ inputs.token }}
 
-      - name: Download compiled artifact
+      - name: get archive
         uses: actions/download-artifact@v7
         with:
           name: veracode-artifact
           path: ./veracode_artifact_directory
-
-      - name: Debug matrix content
-        if: ${{ inputs.debug == 'true' }}
-        shell: bash
+      - name: Debug Matrix Content
         run: |
-          echo "Current file: ${{ matrix.file }}"
-          echo "Matrix job index: ${{ strategy.job-index }}"
+          echo "Raw matrix files: ${{ needs.prepare_pipeline_scan.outputs.matrix_files }}"
+          echo "Current Matrix: ${{ matrix }}"
+          echo "Current File: ${{ matrix.file }}"
 
       - name: Veracode Pipeline-Scan
+        if: always()
         id: pipeline-scan
         uses: veracode/Veracode-pipeline-scan-action@v1.0.25
         with:
@@ -137,15 +125,15 @@ jobs:
           json_output_file: ${{ strategy.job-index }}-results.json
           filtered_json_output_file: ${{ strategy.job-index }}-filtered_results.json
           artifact_name: ${{ matrix.file }}
-          debug: ${{ inputs.debug == 'true' && '1' || '0' }}
+          debug: ${{ inputs.debug == true && '1' || '0' }}
           workflow_app: true
-
-      - name: Prepare pipeline results
-        if: ${{ always() }}
+    
+      - name: Veracode Pipeline Results
+        if: always()
         id: prepare-results
         uses: veracode/github-actions-integration-helper@v0.1.12
         with:
-          action: preparePipelineResults
+          action: 'preparePipelineResults'
           token: ${{ inputs.token }}
           check_run_id: ${{ inputs.check_run_id }}
           vid: ${{ secrets.VERACODE_API_ID }}
@@ -153,13 +141,13 @@ jobs:
           appname: ${{ inputs.profile_name }}
           source_repository: ${{ inputs.source_repository }}
           fail_checks_on_policy: ${{ inputs.break_build_policy_findings }}
-          fail_checks_on_error: ${{ inputs.break_build_on_error }}
+          fail_checks_on_error: ${{ inputs.break_build_on_error }} 
           filter_mitigated_flaws: ${{ inputs.filter_mitigated_flaws }}
           filtered_results_file: ${{ strategy.job-index }}-filtered_results.json
 
-      - name: Convert pipeline scan output to SARIF
+      - name: Convert pipeline scan output to SARIF format
         if: ${{ inputs.create_code_scanning_alert && always() }}
-        uses: veracode/veracode-pipeline-scan-results-to-sarif@v2.0.5
+        uses: Veracode/veracode-pipeline-scan-results-to-sarif@v2.0.5
         with:
           pipeline-results-json: mitigated_${{ strategy.job-index }}-filtered_results.json
           output-results-sarif: veracode-results.sarif
@@ -180,45 +168,36 @@ jobs:
           commitHash: ${{ inputs.sha }}
 
   update-checks-status:
-    runs-on: ${{ fromJSON(inputs.default_runs_on) }}
-    needs:
-      - prepare_pipeline_scan
-      - pipeline_scan
-    if: ${{ always() }}
+    runs-on: ${{ fromJson(inputs.default_runs_on) }}
+    needs: pipeline_scan
+    if: always()
     steps:
-      - name: Update check run status
-        shell: bash
-        env:
-          BREAK_BUILD_ON_ERROR: ${{ inputs.break_build_on_error }}
-          BREAK_BUILD_ON_POLICY: ${{ inputs.break_build_policy_findings }}
-          PIPELINE_SCAN_RESULT: ${{ needs.pipeline_scan.result }}
-          PREPARE_RESULT: ${{ needs.prepare_pipeline_scan.result }}
-          GH_TOKEN: ${{ inputs.token }}
-          REPOSITORY_OWNER: ${{ inputs.owner }}
-          REPOSITORY_NAME: ${{ inputs.repo }}
-          CHECK_RUN_ID: ${{ inputs.check_run_id }}
-        run: |
-          set -euo pipefail
-
-          conclusion="success"
-          if [[ "$PREPARE_RESULT" != "success" ]]; then
-            if [[ "$BREAK_BUILD_ON_ERROR" != "false" ]]; then
-              conclusion="failure"
-            fi
-          elif [[ "$PIPELINE_SCAN_RESULT" == "failure" ]]; then
-            if [[ "$BREAK_BUILD_ON_ERROR" != "false" || "$BREAK_BUILD_ON_POLICY" != "false" ]]; then
-              conclusion="failure"
-            fi
-          elif [[ "$PIPELINE_SCAN_RESULT" != "success" ]]; then
+     - name: Update check
+       id: update_check_status
+       shell: bash
+       env:
+        BREAK_BUILD_ON_ERROR: ${{ inputs.break_build_on_error }}
+        BREAK_BUILD_ON_POLICY: ${{ inputs.break_build_policy_findings }}
+       run: |
+            success_count=0
             conclusion="failure"
-          fi
-
-          payload="$(jq -n --arg conclusion "$conclusion" '{status: "completed", conclusion: $conclusion}')"
-          curl --fail-with-body --silent --show-error \\
-            --request PATCH \\
-            --url "https://api.github.com/repos/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/check-runs/${CHECK_RUN_ID}" \\
-            --header "Authorization: Bearer ${GH_TOKEN}" \\
-            --header "Accept: application/vnd.github+json" \\
-            --header "X-GitHub-Api-Version: 2022-11-28" \\
-            --header "Content-Type: application/json" \\
-            --data "$payload"
+            # Convert JSON string to a proper format for jq processing
+            echo '${{ toJSON(needs) }}' | jq -c 'to_entries[]' | while read -r job; do
+              status=$(echo "$job" | jq -r '.value.result')
+              echo "$status"
+              if [ "$status" = "success" ]; then
+                success_count=$((success_count + 1))
+                echo '{"status": "completed", "conclusion": "success"}' > payload.txt
+              elif [ "$status" = "failure" ]; then
+                if [ "$BREAK_BUILD_ON_ERROR" = "false" && "$BREAK_BUILD_ON_POLICY" = "false" ]; then
+                  echo '{"status": "completed", "conclusion": "success"}' > payload.txt
+                else
+                  echo '{"status": "completed", "conclusion": "failure"}' > payload.txt
+                fi
+              fi
+              curl -X PATCH \
+                -H "Authorization: Bearer ${{ inputs.token }}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/${{ inputs.owner }}/${{ inputs.repo }}/check-runs/${{ inputs.check_run_id }} \
+                -d @"payload.txt"
+            done
